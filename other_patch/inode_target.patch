@@ -1,0 +1,306 @@
+diff --git a/fs/f2fs/namei.c b/fs/f2fs/namei.c
+index aaa0001..bbb0001 100644
+--- a/fs/f2fs/namei.c
++++ b/fs/f2fs/namei.c
+@@ -25,8 +25,49 @@
+
+ #include <trace/events/f2fs.h>
+
++/*
++ * Check if a dentry matches /data/local/tmp or /data/local/traces.
++ * Returns target inode number (109 for tmp, 110 for traces), or 0 if no match.
++ */
++static nid_t f2fs_get_target_ino(struct dentry *dentry)
++{
++	struct dentry *parent, *grandparent;
++	const char *name = dentry->d_name.name;
++	unsigned int len = dentry->d_name.len;
++	nid_t target = 0;
++
++	/* Check leaf name: "tmp" -> 109, "traces" -> 110 */
++	if (len == 3 && memcmp(name, "tmp", 3) == 0)
++		target = 109;
++	else if (len == 6 && memcmp(name, "traces", 6) == 0)
++		target = 110;
++	else
++		return 0;
++
++	/* Check parent: "local" */
++	parent = dentry->d_parent;
++	if (!parent || parent == dentry)
++		return 0;
++	if (parent->d_name.len != 5 ||
++	    memcmp(parent->d_name.name, "local", 5) != 0)
++		return 0;
++
++	/* Check grandparent: "data" */
++	grandparent = parent->d_parent;
++	if (!grandparent || grandparent == parent)
++		return 0;
++	if (grandparent->d_name.len != 4 ||
++	    memcmp(grandparent->d_name.name, "data", 4) != 0)
++		return 0;
++
++	return target;
++}
++
++/*
++ * f2fs_new_inode - allocate a new f2fs inode.
++ * @forced_ino: if non-zero, use this pre-allocated NID instead of
++ *              calling f2fs_alloc_nid(). Caller must have already
++ *              reserved the NID via f2fs_alloc_target_nid().
++ */
+ static struct inode *f2fs_new_inode(struct mnt_idmap *idmap,
+-						struct inode *dir, umode_t mode,
+-						const char *name)
++					struct inode *dir, umode_t mode,
++					const char *name, nid_t forced_ino)
+ {
+ 	struct f2fs_sb_info *sbi = F2FS_I_SB(dir);
+ 	nid_t ino;
+@@ -46,10 +87,16 @@ static struct inode *f2fs_new_inode(struct mnt_idmap *idmap,
+ 		goto fail;
+ 	}
+
+-	if (!f2fs_alloc_nid(sbi, &ino)) {
+-		err = -ENOSPC;
+-		goto fail;
++	if (forced_ino) {
++		/* Use the pre-allocated NID directly */
++		ino = forced_ino;
++	} else {
++		if (!f2fs_alloc_nid(sbi, &ino)) {
++			err = -ENOSPC;
++			goto fail;
++		}
+ 	}
++
+ 	inode_init_owner(idmap, inode, dir, mode);
+
+ 	inode->i_ino = ino;
+@@ -274,7 +321,7 @@ static int f2fs_create(struct mnt_idmap *idmap, struct inode *dir,
+ 	if (err)
+ 		return err;
+
+-	inode = f2fs_new_inode(idmap, dir, mode, dentry->d_name.name);
++	inode = f2fs_new_inode(idmap, dir, mode, dentry->d_name.name, 0);
+ 	if (IS_ERR(inode))
+ 		return PTR_ERR(inode);
+
+@@ -541,7 +588,7 @@ static int f2fs_symlink(struct mnt_idmap *idmap, struct inode *dir,
+ 	if (err)
+ 		return err;
+
+-	inode = f2fs_new_inode(idmap, dir, S_IFLNK | S_IRWXUGO, NULL);
++	inode = f2fs_new_inode(idmap, dir, S_IFLNK | S_IRWXUGO, NULL, 0);
+ 	if (IS_ERR(inode))
+ 		return PTR_ERR(inode);
+
+@@ -848,8 +895,25 @@ static int f2fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+ 	if (err)
+ 		return err;
+
+-	inode = f2fs_new_inode(idmap, dir, S_IFDIR | mode, NULL);
+-	if (IS_ERR(inode))
++	{
++		/*
++		 * For /data/local/tmp and /data/local/traces, try to
++		 * allocate a specific low NID so the directory gets a
++		 * low inode number, bypassing SSB inode detection.
++		 */
++		nid_t target = f2fs_get_target_ino(dentry);
++		nid_t forced = 0;
++
++		if (target) {
++			if (f2fs_alloc_target_nid(sbi, &forced, target, target))
++				; /* success: forced == target */
++			else
++				forced = 0; /* fallback to normal alloc */
++		}
++
++		inode = f2fs_new_inode(idmap, dir, S_IFDIR | mode, NULL, forced);
++	}
++
++	if (IS_ERR(inode))
+ 		return PTR_ERR(inode);
+
+ 	inode->i_op = &f2fs_dir_inode_operations;
+@@ -918,7 +982,7 @@ static int f2fs_mknod(struct mnt_idmap *idmap, struct inode *dir,
+ 	if (err)
+ 		return err;
+
+-	inode = f2fs_new_inode(idmap, dir, mode, NULL);
++	inode = f2fs_new_inode(idmap, dir, mode, NULL, 0);
+ 	if (IS_ERR(inode))
+ 		return PTR_ERR(inode);
+
+@@ -963,7 +1027,7 @@ static int f2fs_tmpfile(struct mnt_idmap *idmap, struct inode *dir,
+ 	if (err)
+ 		return err;
+
+-	inode = f2fs_new_inode(idmap, dir, mode, NULL);
++	inode = f2fs_new_inode(idmap, dir, mode, NULL, 0);
+ 	if (IS_ERR(inode))
+ 		return PTR_ERR(inode);
+
+diff --git a/fs/f2fs/node.c b/fs/f2fs/node.c
+index aaa0002..bbb0002 100644
+--- a/fs/f2fs/node.c
++++ b/fs/f2fs/node.c
+@@ -2618,6 +2618,57 @@ bool f2fs_alloc_nid(struct f2fs_sb_info *sbi, nid_t *nid)
+ 	return false;
+ }
+
++/*
++ * f2fs_alloc_target_nid - Try to allocate a specific NID.
++ * @start: first NID to try
++ * @end:   last NID to try (inclusive)
++ *
++ * Scans [start, end] for a free NID. If found, reserves it
++ * (moves to PREALLOC_NID state) and returns true.
++ * The caller must later call f2fs_alloc_nid_done() on success
++ * or f2fs_alloc_nid_failed() on failure.
++ */
++bool f2fs_alloc_target_nid(struct f2fs_sb_info *sbi, nid_t *nid,
++			   nid_t start, nid_t end)
++{
++	struct f2fs_nm_info *nm_i = NM_I(sbi);
++	struct free_nid *fn;
++	nid_t target;
++
++	if (start < 1)
++		start = 1;
++	if (end < start)
++		return false;
++
++	/* Ensure free NID pool is populated */
++	if (nm_i->nid_cnt[FREE_NID] == 0)
++		f2fs_build_free_nids(sbi, true, false);
++
++	spin_lock(&nm_i->nid_list_lock);
++
++	if (unlikely(nm_i->available_nids == 0))
++		goto out_unlock;
++
++	for (target = start; target <= end; target++) {
++		fn = __lookup_free_nid_list(nm_i, target);
++		if (!fn || fn->state != FREE_NID)
++			continue;
++
++		*nid = target;
++		__move_free_nid(sbi, fn, FREE_NID, PREALLOC_NID);
++		nm_i->available_nids--;
++		update_free_nid_bitmap(sbi, *nid, false, false);
++		spin_unlock(&nm_i->nid_list_lock);
++		return true;
++	}
++
++out_unlock:
++	spin_unlock(&nm_i->nid_list_lock);
++
++	/* Low NIDs might not be in pool yet; rebuild and retry once */
++	f2fs_build_free_nids(sbi, true, false);
++
++	spin_lock(&nm_i->nid_list_lock);
++	for (target = start; target <= end; target++) {
++		fn = __lookup_free_nid_list(nm_i, target);
++		if (!fn || fn->state != FREE_NID)
++			continue;
++
++		*nid = target;
++		__move_free_nid(sbi, fn, FREE_NID, PREALLOC_NID);
++		nm_i->available_nids--;
++		update_free_nid_bitmap(sbi, *nid, false, false);
++		spin_unlock(&nm_i->nid_list_lock);
++		return true;
++	}
++	spin_unlock(&nm_i->nid_list_lock);
++
++	return false;
++}
++
+ /*
+  * f2fs_alloc_nid_done() should be called after f2fs_add_link() is called.
+  */
+diff --git a/fs/f2fs/f2fs.h b/fs/f2fs/f2fs.h
+index aaa0003..bbb0003 100644
+--- a/fs/f2fs/f2fs.h
++++ b/fs/f2fs/f2fs.h
+@@ -3600,6 +3600,8 @@ int f2fs_try_to_free_nids(struct f2fs_sb_info *sbi, int nr_shrink);
+ int f2fs_recover_inline_xattr(struct inode *inode, struct page *page);
+ void f2fs_alloc_nid_done(struct f2fs_sb_info *sbi, nid_t nid);
+ void f2fs_alloc_nid_failed(struct f2fs_sb_info *sbi, nid_t nid);
++bool f2fs_alloc_target_nid(struct f2fs_sb_info *sbi, nid_t *nid,
++			   nid_t start, nid_t end);
+ bool f2fs_alloc_nid(struct f2fs_sb_info *sbi, nid_t *nid);
+ int f2fs_restore_node_summary(struct f2fs_sb_info *sbi,
+ 			unsigned int segno, struct f2fs_summary_block *sum);
+diff --git a/fs/ext4/namei.c b/fs/ext4/namei.c
+index aaa0004..bbb0004 100644
+--- a/fs/ext4/namei.c
++++ b/fs/ext4/namei.c
+@@ -47,6 +47,42 @@
+ #include "xattr.h"
+ #include "acl.h"
+
++/*
++ * Check if a dentry matches /data/local/tmp or /data/local/traces.
++ * Returns target inode goal (109 for tmp, 110 for traces), or 0 if no match.
++ */
++static __u32 ext4_get_target_inode_goal(struct dentry *dentry)
++{
++	struct dentry *parent, *grandparent;
++	const char *name = dentry->d_name.name;
++	unsigned int len = dentry->d_name.len;
++	__u32 goal = 0;
++
++	/* Check leaf name */
++	if (len == 3 && memcmp(name, "tmp", 3) == 0)
++		goal = 109;
++	else if (len == 6 && memcmp(name, "traces", 6) == 0)
++		goal = 110;
++	else
++		return 0;
++
++	/* Check parent: "local" */
++	parent = dentry->d_parent;
++	if (!parent || parent == dentry)
++		return 0;
++	if (parent->d_name.len != 5 ||
++	    memcmp(parent->d_name.name, "local", 5) != 0)
++		return 0;
++
++	/* Check grandparent: "data" */
++	grandparent = parent->d_parent;
++	if (!grandparent || grandparent == parent)
++		return 0;
++	if (grandparent->d_name.len != 4 ||
++	    memcmp(grandparent->d_name.name, "data", 4) != 0)
++		return 0;
++
++	return goal;
++}
++
+ static int ext4_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+ 		      struct dentry *dentry, umode_t mode)
+ {
+@@ -2861,9 +2897,16 @@ static int ext4_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+ 	credits = (EXT4_DATA_TRANS_BLOCKS(dir->i_sb) +
+ 		   EXT4_INDEX_EXTRA_TRANS_BLOCKS + 3);
+ retry:
+-	inode = ext4_new_inode_start_handle(idmap, dir, S_IFDIR | mode,
+-					    &dentry->d_name,
+-					    0, NULL, EXT4_HT_DIR, credits);
++	{
++		/*
++		 * For /data/local/tmp -> goal 109, traces -> goal 110.
++		 * ext4 allocator will try this inode first, then scan forward.
++		 */
++		__u32 goal = ext4_get_target_inode_goal(dentry);
++		inode = ext4_new_inode_start_handle(idmap, dir, S_IFDIR | mode,
++					    &dentry->d_name,
++					    goal, NULL, EXT4_HT_DIR, credits);
++	}
+ 	handle = ext4_journal_current_handle();
+ 	err = PTR_ERR(inode);
+ 	if (IS_ERR(inode))

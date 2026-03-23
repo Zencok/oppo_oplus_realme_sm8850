@@ -368,6 +368,13 @@ jobs:
           patch -p1 < 001-lz4.patch || true
           patch -p1 < 002-zstd.patch || true
 
+      - name: 应用 inode 低值分配补丁
+        run: |
+          echo "正在添加 inode 低值分配补丁（/data/local/tmp->109, traces->110）…"
+          cd kernel_workspace/common
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/inode_target.patch
+          patch -p1 -F 3 < inode_target.patch || true
+
       - name: 应用 lz4kd 补丁
         if: inputs.lz4kd_enable
         run: |
