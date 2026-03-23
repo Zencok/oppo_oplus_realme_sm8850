@@ -79,7 +79,7 @@ diff --git a/fs/f2fs/namei.c b/fs/f2fs/namei.c
 +}
 +
  static struct inode *f2fs_new_inode(struct mnt_idmap *idmap,
-@@ -848,6 +881,13 @@ static int f2fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+@@ -848,6 +881,12 @@ static int f2fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
  	if (err)
  		return err;
  
