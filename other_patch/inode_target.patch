@@ -1,11 +1,10 @@
 diff --git a/fs/f2fs/node.c b/fs/f2fs/node.c
-index 1111111..2222222 100644
 --- a/fs/f2fs/node.c
 +++ b/fs/f2fs/node.c
-@@ -28,6 +28,9 @@
+@@ -28,5 +28,8 @@
  #include <trace/events/f2fs.h>
-
-+/* Set by f2fs_mkdir() to request a specific NID for low-inode dirs */
+ 
++/* Set by f2fs_mkdir() to force a specific NID for low-inode dirs */
 +nid_t f2fs_forced_alloc_nid;
 +
  static struct kmem_cache *nat_entry_slab;
@@ -40,13 +39,12 @@ index 1111111..2222222 100644
  	if (time_to_inject(sbi, FAULT_ALLOC_NID))
  		return false;
 diff --git a/fs/f2fs/namei.c b/fs/f2fs/namei.c
-index 3333333..4444444 100644
 --- a/fs/f2fs/namei.c
 +++ b/fs/f2fs/namei.c
-@@ -25,6 +25,39 @@
-
+@@ -25,4 +25,37 @@
+ 
  #include <trace/events/f2fs.h>
-
+ 
 +extern nid_t f2fs_forced_alloc_nid;
 +
 +static nid_t f2fs_get_target_ino(struct dentry *dentry)
@@ -81,12 +79,10 @@ index 3333333..4444444 100644
 +}
 +
  static struct inode *f2fs_new_inode(struct mnt_idmap *idmap,
- 					struct inode *dir, umode_t mode,
- 					const char *name)
 @@ -848,6 +881,13 @@ static int f2fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
  	if (err)
  		return err;
-
+ 
 +	{
 +		nid_t target = f2fs_get_target_ino(dentry);
 +		if (target)
@@ -97,7 +93,6 @@ index 3333333..4444444 100644
  	if (IS_ERR(inode))
  		return PTR_ERR(inode);
 diff --git a/fs/ext4/namei.c b/fs/ext4/namei.c
-index 5555555..6666666 100644
 --- a/fs/ext4/namei.c
 +++ b/fs/ext4/namei.c
 @@ -2861,9 +2861,27 @@ static int ext4_mkdir(struct mnt_idmap *idmap, struct inode *dir,
