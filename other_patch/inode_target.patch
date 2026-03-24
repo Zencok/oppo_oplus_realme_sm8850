@@ -1,5 +1,5 @@
 diff --git a/fs/f2fs/node.c b/fs/f2fs/node.c
-index 5f15c22..0e2941b 100644
+index 5f15c22..29bc093 100644
 --- a/fs/f2fs/node.c
 +++ b/fs/f2fs/node.c
 @@ -20,6 +20,9 @@
@@ -12,7 +12,7 @@ index 5f15c22..0e2941b 100644
  #define on_f2fs_build_free_nids(nm_i) mutex_is_locked(&(nm_i)->build_lock)
  
  static struct kmem_cache *nat_entry_slab;
-@@ -2600,6 +2603,50 @@ int f2fs_build_free_nids(struct f2fs_sb_info *sbi, bool sync, bool mount)
+@@ -2600,6 +2603,94 @@ int f2fs_build_free_nids(struct f2fs_sb_info *sbi, bool sync, bool mount)
  	return ret;
  }
  
@@ -60,10 +60,54 @@ index 5f15c22..0e2941b 100644
 +	f2fs_up_read(&nm_i->nat_tree_lock);
 +}
 +
++static bool __f2fs_force_stage_exact_nid(struct f2fs_sb_info *sbi,
++					 nid_t candidate)
++{
++	struct f2fs_nm_info *nm_i = NM_I(sbi);
++	struct free_nid *i, *e;
++	bool ret = false;
++	bool need_free = true;
++	int err = -EINVAL;
++
++	if (unlikely(candidate == 0))
++		return false;
++	if (unlikely(f2fs_check_nid_range(sbi, candidate)))
++		return false;
++
++	i = f2fs_kmem_cache_alloc(free_nid_slab, GFP_NOFS, true, NULL);
++	i->nid = candidate;
++	i->state = FREE_NID;
++
++	radix_tree_preload(GFP_NOFS | __GFP_NOFAIL);
++	spin_lock(&nm_i->nid_list_lock);
++
++	e = __lookup_free_nid_list(nm_i, candidate);
++	if (e) {
++		ret = (e->state == FREE_NID);
++		goto out;
++	}
++
++	err = __insert_free_nid(sbi, i);
++	if (!err) {
++		need_free = false;
++		ret = true;
++		nm_i->available_nids++;
++		update_free_nid_bitmap(sbi, candidate, true, false);
++		pr_info("lowinode: force-stage nid=%u\n", candidate);
++	}
++out:
++	spin_unlock(&nm_i->nid_list_lock);
++	radix_tree_preload_end();
++
++	if (need_free)
++		kmem_cache_free(free_nid_slab, i);
++	return ret;
++}
++
  /*
   * If this function returns success, caller can obtain a new nid
   * from second parameter of this function.
-@@ -2609,6 +2656,34 @@ bool f2fs_alloc_nid(struct f2fs_sb_info *sbi, nid_t *nid)
+@@ -2609,6 +2700,43 @@ bool f2fs_alloc_nid(struct f2fs_sb_info *sbi, nid_t *nid)
  {
  	struct f2fs_nm_info *nm_i = NM_I(sbi);
  	struct free_nid *i = NULL;
@@ -92,6 +136,15 @@ index 5f15c22..0e2941b 100644
 +		}
 +		spin_unlock(&nm_i->nid_list_lock);
 +
++		if (__f2fs_force_stage_exact_nid(sbi, requested)) {
++			spin_lock(&nm_i->nid_list_lock);
++			if (__f2fs_try_prealloc_exact_nid(sbi, nid, requested)) {
++				spin_unlock(&nm_i->nid_list_lock);
++				return true;
++			}
++			spin_unlock(&nm_i->nid_list_lock);
++		}
++
 +		pr_info("lowinode: exact nid unavailable=%u\n", requested);
 +		return false;
 +	}
@@ -99,7 +152,7 @@ index 5f15c22..0e2941b 100644
  	if (time_to_inject(sbi, FAULT_ALLOC_NID))
  		return false;
 diff --git a/fs/f2fs/super.c b/fs/f2fs/super.c
-index 482b9eb..b16ebb8 100644
+index 482b9eb..6f6579d 100644
 --- a/fs/f2fs/super.c
 +++ b/fs/f2fs/super.c
 @@ -14,6 +14,7 @@
@@ -125,8 +178,8 @@ index 482b9eb..b16ebb8 100644
 +extern nid_t f2fs_forced_alloc_nid;
 +extern struct task_struct *f2fs_forced_alloc_task;
 +
-+#define F2FS_LOWINODE_MIN	100
-+#define F2FS_LOWINODE_MAX	140
++#define F2FS_LOWINODE_MIN	109
++#define F2FS_LOWINODE_MAX	110
 +#define F2FS_LOWINODE_START_MS	3000
 +#define F2FS_LOWINODE_RETRY_MS	5000
 +#define F2FS_LOWINODE_RETRY_MAX	60
