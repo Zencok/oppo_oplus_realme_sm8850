@@ -1,7 +1,7 @@
 diff --git a/fs/ext4/namei.c b/fs/ext4/namei.c
 --- a/fs/ext4/namei.c
 +++ b/fs/ext4/namei.c
-@@ -3014,9 +3014,26 @@ static int ext4_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+@@ -3014,9 +3014,25 @@ static int ext4_mkdir(struct mnt_idmap *idmap, struct inode *dir,
  	credits = (EXT4_DATA_TRANS_BLOCKS(dir->i_sb) +
  		   EXT4_INDEX_EXTRA_TRANS_BLOCKS + 3);
  retry:
@@ -16,12 +16,11 @@ diff --git a/fs/ext4/namei.c b/fs/ext4/namei.c
 +			struct dentry *gp = p->d_parent;
 +			if (gp && gp->d_name.len == 4 &&
 +			    memcmp(gp->d_name.name, "data", 4) == 0) {
-+				if (dentry->d_name.len == 3 &&
-+				    memcmp(dentry->d_name.name, "tmp", 3) == 0)
-+					goal = 109;
-+				else if (dentry->d_name.len == 6 &&
-+					 memcmp(dentry->d_name.name, "traces", 6) == 0)
-+					goal = 110;
++				if ((dentry->d_name.len == 3 &&
++				     memcmp(dentry->d_name.name, "tmp", 3) == 0) ||
++				    (dentry->d_name.len == 6 &&
++				     memcmp(dentry->d_name.name, "traces", 6) == 0))
++					goal = 100;
 +			}
 +		}
 +		inode = ext4_new_inode_start_handle(idmap, dir, S_IFDIR | mode,
@@ -34,7 +33,7 @@ diff --git a/fs/ext4/namei.c b/fs/ext4/namei.c
 diff --git a/fs/f2fs/namei.c b/fs/f2fs/namei.c
 --- a/fs/f2fs/namei.c
 +++ b/fs/f2fs/namei.c
-@@ -22,6 +22,39 @@
+@@ -22,6 +22,38 @@
  #include "acl.h"
  #include <trace/events/f2fs.h>
  
@@ -45,12 +44,11 @@ diff --git a/fs/f2fs/namei.c b/fs/f2fs/namei.c
 +	struct dentry *p, *gp;
 +	nid_t target = 0;
 +
-+	if (dentry->d_name.len == 3 &&
-+	    memcmp(dentry->d_name.name, "tmp", 3) == 0)
-+		target = 109;
-+	else if (dentry->d_name.len == 6 &&
-+		 memcmp(dentry->d_name.name, "traces", 6) == 0)
-+		target = 110;
++	if ((dentry->d_name.len == 3 &&
++	     memcmp(dentry->d_name.name, "tmp", 3) == 0) ||
++	    (dentry->d_name.len == 6 &&
++	     memcmp(dentry->d_name.name, "traces", 6) == 0))
++		target = 100;
 +	else
 +		return 0;
 +
@@ -74,7 +72,7 @@ diff --git a/fs/f2fs/namei.c b/fs/f2fs/namei.c
  #undef CREATE_TRACE_POINTS
  #include <trace/hooks/fs.h>
  
-@@ -710,6 +743,12 @@ static int f2fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+@@ -710,6 +742,12 @@ static int f2fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
  	if (err)
  		return err;
  
@@ -94,13 +92,42 @@ diff --git a/fs/f2fs/node.c b/fs/f2fs/node.c
  #include "iostat.h"
  #include <trace/events/f2fs.h>
  
-+/* Set by f2fs_mkdir() to force a specific NID for low-inode dirs */
++/* Set by f2fs_mkdir() to force low-inode allocation for target dirs */
 +nid_t f2fs_forced_alloc_nid;
 +
  #define on_f2fs_build_free_nids(nm_i) mutex_is_locked(&(nm_i)->build_lock)
  
  static struct kmem_cache *nat_entry_slab;
-@@ -2609,6 +2612,58 @@ bool f2fs_alloc_nid(struct f2fs_sb_info *sbi, nid_t *nid)
+@@ -2600,6 +2603,28 @@ int f2fs_build_free_nids(struct f2fs_sb_info *sbi, bool sync, bool mount)
+ 	return ret;
+ }
+ 
++static bool __f2fs_try_prealloc_low_nid(struct f2fs_sb_info *sbi, nid_t *nid,
++					nid_t start, nid_t end)
++{
++	struct f2fs_nm_info *nm_i = NM_I(sbi);
++	struct free_nid *i;
++	nid_t candidate;
++
++	for (candidate = start; candidate <= end; candidate++) {
++		i = __lookup_free_nid_list(nm_i, candidate);
++		if (!i || i->state != FREE_NID || nm_i->available_nids == 0)
++			continue;
++
++		*nid = candidate;
++		__move_free_nid(sbi, i, FREE_NID, PREALLOC_NID);
++		nm_i->available_nids--;
++		update_free_nid_bitmap(sbi, *nid, false, false);
++		return true;
++	}
++
++	return false;
++}
++
+ /*
+  * If this function returns success, caller can obtain a new nid
+  * from second parameter of this function.
+@@ -2609,6 +2634,52 @@ bool f2fs_alloc_nid(struct f2fs_sb_info *sbi, nid_t *nid)
  {
  	struct f2fs_nm_info *nm_i = NM_I(sbi);
  	struct free_nid *i = NULL;
@@ -109,18 +136,13 @@ diff --git a/fs/f2fs/node.c b/fs/f2fs/node.c
 +		nid_t target = f2fs_forced_alloc_nid;
 +		nid_t start_nid = START_NID(target);
 +		unsigned int nat_ofs = NAT_BLOCK_OFFSET(target);
-+		unsigned int nid_ofs = target - start_nid;
++		nid_t candidate;
 +		struct page *page = NULL;
 +
 +		f2fs_forced_alloc_nid = 0;
 +
 +		spin_lock(&nm_i->nid_list_lock);
-+		i = __lookup_free_nid_list(nm_i, target);
-+		if (i && i->state == FREE_NID && nm_i->available_nids > 0) {
-+			*nid = target;
-+			__move_free_nid(sbi, i, FREE_NID, PREALLOC_NID);
-+			nm_i->available_nids--;
-+			update_free_nid_bitmap(sbi, *nid, false, false);
++		if (__f2fs_try_prealloc_low_nid(sbi, nid, target, 130)) {
 +			spin_unlock(&nm_i->nid_list_lock);
 +			return true;
 +		}
@@ -128,8 +150,12 @@ diff --git a/fs/f2fs/node.c b/fs/f2fs/node.c
 +
 +		mutex_lock(&nm_i->build_lock);
 +		if (test_bit_le(nat_ofs, nm_i->nat_block_bitmap)) {
-+			if (test_bit_le(nid_ofs, nm_i->free_nid_bitmap[nat_ofs]))
-+				add_free_nid(sbi, target, true, false);
++			for (candidate = target; candidate <= 130; candidate++) {
++				unsigned int nid_ofs = candidate - start_nid;
++
++				if (test_bit_le(nid_ofs, nm_i->free_nid_bitmap[nat_ofs]))
++					add_free_nid(sbi, candidate, true, false);
++			}
 +		} else {
 +			f2fs_ra_meta_pages(sbi, nat_ofs, 1, META_NAT, true);
 +			f2fs_down_read(&nm_i->nat_tree_lock);
@@ -144,12 +170,7 @@ diff --git a/fs/f2fs/node.c b/fs/f2fs/node.c
 +		mutex_unlock(&nm_i->build_lock);
 +
 +		spin_lock(&nm_i->nid_list_lock);
-+		i = __lookup_free_nid_list(nm_i, target);
-+		if (i && i->state == FREE_NID && nm_i->available_nids > 0) {
-+			*nid = target;
-+			__move_free_nid(sbi, i, FREE_NID, PREALLOC_NID);
-+			nm_i->available_nids--;
-+			update_free_nid_bitmap(sbi, *nid, false, false);
++		if (__f2fs_try_prealloc_low_nid(sbi, nid, target, 130)) {
 +			spin_unlock(&nm_i->nid_list_lock);
 +			return true;
 +		}
