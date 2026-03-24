@@ -1,48 +1,41 @@
-diff --git a/fs/f2fs/node.c b/fs/f2fs/node.c
---- a/fs/f2fs/node.c
-+++ b/fs/f2fs/node.c
-@@ -28,5 +28,8 @@
- #include <trace/events/f2fs.h>
- 
-+/* Set by f2fs_mkdir() to force a specific NID for low-inode dirs */
-+nid_t f2fs_forced_alloc_nid;
-+
- static struct kmem_cache *nat_entry_slab;
- static struct kmem_cache *free_nid_slab;
- static struct kmem_cache *nat_entry_set_slab;
-@@ -2600,6 +2603,27 @@ bool f2fs_alloc_nid(struct f2fs_sb_info *sbi, nid_t *nid)
- {
- 	struct f2fs_nm_info *nm_i = NM_I(sbi);
- 	struct free_nid *i = NULL;
-+
-+	if (f2fs_forced_alloc_nid) {
-+		nid_t target = f2fs_forced_alloc_nid;
-+		f2fs_forced_alloc_nid = 0;
-+
-+		f2fs_build_free_nids(sbi, true, false);
-+
-+		spin_lock(&nm_i->nid_list_lock);
-+		i = __lookup_free_nid_list(nm_i, target);
-+		if (i && i->state == FREE_NID && nm_i->available_nids > 0) {
-+			*nid = target;
-+			__move_free_nid(sbi, i, FREE_NID, PREALLOC_NID);
-+			nm_i->available_nids--;
-+			update_free_nid_bitmap(sbi, *nid, false, false);
-+			spin_unlock(&nm_i->nid_list_lock);
-+			return true;
-+		}
-+		spin_unlock(&nm_i->nid_list_lock);
-+		i = NULL;
-+	}
-+
+diff --git a/fs/ext4/namei.c b/fs/ext4/namei.c
+--- a/fs/ext4/namei.c
++++ b/fs/ext4/namei.c
+@@ -3014,9 +3014,26 @@ static int ext4_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+ 	credits = (EXT4_DATA_TRANS_BLOCKS(dir->i_sb) +
+ 		   EXT4_INDEX_EXTRA_TRANS_BLOCKS + 3);
  retry:
- 	if (time_to_inject(sbi, FAULT_ALLOC_NID))
- 		return false;
+-	inode = ext4_new_inode_start_handle(idmap, dir, S_IFDIR | mode,
+-					    &dentry->d_name,
+-					    0, NULL, EXT4_HT_DIR, credits);
++	{
++		__u32 goal = 0;
++		struct dentry *p = dentry->d_parent;
++		if (p && p->d_name.len == 5 &&
++		    memcmp(p->d_name.name, "local", 5) == 0) {
++			struct dentry *gp = p->d_parent;
++			if (gp && gp->d_name.len == 4 &&
++			    memcmp(gp->d_name.name, "data", 4) == 0) {
++				if (dentry->d_name.len == 3 &&
++				    memcmp(dentry->d_name.name, "tmp", 3) == 0)
++					goal = 109;
++				else if (dentry->d_name.len == 6 &&
++					 memcmp(dentry->d_name.name, "traces", 6) == 0)
++					goal = 110;
++			}
++		}
++		inode = ext4_new_inode_start_handle(idmap, dir, S_IFDIR | mode,
++						    &dentry->d_name,
++						    goal, NULL, EXT4_HT_DIR, credits);
++	}
+ 	handle = ext4_journal_current_handle();
+ 	err = PTR_ERR(inode);
+ 	if (IS_ERR(inode))
 diff --git a/fs/f2fs/namei.c b/fs/f2fs/namei.c
 --- a/fs/f2fs/namei.c
 +++ b/fs/f2fs/namei.c
-@@ -25,4 +25,37 @@
- 
+@@ -22,6 +22,39 @@
+ #include "acl.h"
  #include <trace/events/f2fs.h>
  
 +extern nid_t f2fs_forced_alloc_nid;
@@ -78,8 +71,10 @@ diff --git a/fs/f2fs/namei.c b/fs/f2fs/namei.c
 +	return target;
 +}
 +
- static struct inode *f2fs_new_inode(struct mnt_idmap *idmap,
-@@ -848,6 +881,12 @@ static int f2fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+ #undef CREATE_TRACE_POINTS
+ #include <trace/hooks/fs.h>
+ 
+@@ -710,6 +743,12 @@ static int f2fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
  	if (err)
  		return err;
  
@@ -92,36 +87,75 @@ diff --git a/fs/f2fs/namei.c b/fs/f2fs/namei.c
  	inode = f2fs_new_inode(idmap, dir, S_IFDIR | mode, NULL);
  	if (IS_ERR(inode))
  		return PTR_ERR(inode);
-diff --git a/fs/ext4/namei.c b/fs/ext4/namei.c
---- a/fs/ext4/namei.c
-+++ b/fs/ext4/namei.c
-@@ -2861,9 +2861,26 @@ static int ext4_mkdir(struct mnt_idmap *idmap, struct inode *dir,
- 	credits = (EXT4_DATA_TRANS_BLOCKS(dir->i_sb) +
- 		   EXT4_INDEX_EXTRA_TRANS_BLOCKS + 3);
- retry:
--	inode = ext4_new_inode_start_handle(idmap, dir, S_IFDIR | mode,
--					    &dentry->d_name,
--					    0, NULL, EXT4_HT_DIR, credits);
-+	{
-+		__u32 goal = 0;
-+		struct dentry *p = dentry->d_parent;
-+		if (p && p->d_name.len == 5 &&
-+		    memcmp(p->d_name.name, "local", 5) == 0) {
-+			struct dentry *gp = p->d_parent;
-+			if (gp && gp->d_name.len == 4 &&
-+			    memcmp(gp->d_name.name, "data", 4) == 0) {
-+				if (dentry->d_name.len == 3 &&
-+				    memcmp(dentry->d_name.name, "tmp", 3) == 0)
-+					goal = 109;
-+				else if (dentry->d_name.len == 6 &&
-+					 memcmp(dentry->d_name.name, "traces", 6) == 0)
-+					goal = 110;
-+			}
+diff --git a/fs/f2fs/node.c b/fs/f2fs/node.c
+--- a/fs/f2fs/node.c
++++ b/fs/f2fs/node.c
+@@ -20,6 +20,9 @@
+ #include "iostat.h"
+ #include <trace/events/f2fs.h>
+ 
++/* Set by f2fs_mkdir() to force a specific NID for low-inode dirs */
++nid_t f2fs_forced_alloc_nid;
++
+ #define on_f2fs_build_free_nids(nm_i) mutex_is_locked(&(nm_i)->build_lock)
+ 
+ static struct kmem_cache *nat_entry_slab;
+@@ -2609,6 +2612,58 @@ bool f2fs_alloc_nid(struct f2fs_sb_info *sbi, nid_t *nid)
+ {
+ 	struct f2fs_nm_info *nm_i = NM_I(sbi);
+ 	struct free_nid *i = NULL;
++
++	if (f2fs_forced_alloc_nid) {
++		nid_t target = f2fs_forced_alloc_nid;
++		nid_t start_nid = START_NID(target);
++		unsigned int nat_ofs = NAT_BLOCK_OFFSET(target);
++		unsigned int nid_ofs = target - start_nid;
++		struct page *page = NULL;
++
++		f2fs_forced_alloc_nid = 0;
++
++		spin_lock(&nm_i->nid_list_lock);
++		i = __lookup_free_nid_list(nm_i, target);
++		if (i && i->state == FREE_NID && nm_i->available_nids > 0) {
++			*nid = target;
++			__move_free_nid(sbi, i, FREE_NID, PREALLOC_NID);
++			nm_i->available_nids--;
++			update_free_nid_bitmap(sbi, *nid, false, false);
++			spin_unlock(&nm_i->nid_list_lock);
++			return true;
 +		}
-+		inode = ext4_new_inode_start_handle(idmap, dir, S_IFDIR | mode,
-+						    &dentry->d_name,
-+						    goal, NULL, EXT4_HT_DIR, credits);
++		spin_unlock(&nm_i->nid_list_lock);
++
++		mutex_lock(&nm_i->build_lock);
++		if (test_bit_le(nat_ofs, nm_i->nat_block_bitmap)) {
++			if (test_bit_le(nid_ofs, nm_i->free_nid_bitmap[nat_ofs]))
++				add_free_nid(sbi, target, true, false);
++		} else {
++			f2fs_ra_meta_pages(sbi, nat_ofs, 1, META_NAT, true);
++			f2fs_down_read(&nm_i->nat_tree_lock);
++			page = get_current_nat_page(sbi, start_nid);
++			if (!IS_ERR(page)) {
++				if (scan_nat_page(sbi, page, start_nid))
++					clear_bit_le(nat_ofs, nm_i->nat_block_bitmap);
++				f2fs_put_page(page, 1);
++			}
++			f2fs_up_read(&nm_i->nat_tree_lock);
++		}
++		mutex_unlock(&nm_i->build_lock);
++
++		spin_lock(&nm_i->nid_list_lock);
++		i = __lookup_free_nid_list(nm_i, target);
++		if (i && i->state == FREE_NID && nm_i->available_nids > 0) {
++			*nid = target;
++			__move_free_nid(sbi, i, FREE_NID, PREALLOC_NID);
++			nm_i->available_nids--;
++			update_free_nid_bitmap(sbi, *nid, false, false);
++			spin_unlock(&nm_i->nid_list_lock);
++			return true;
++		}
++		spin_unlock(&nm_i->nid_list_lock);
 +	}
- 	handle = ext4_journal_current_handle();
- 	err = PTR_ERR(inode);
- 	if (IS_ERR(inode))
++
+ retry:
+ 	if (time_to_inject(sbi, FAULT_ALLOC_NID))
+ 		return false;
