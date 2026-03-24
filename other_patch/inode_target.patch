@@ -1,7 +1,7 @@
 diff --git a/fs/ext4/namei.c b/fs/ext4/namei.c
 --- a/fs/ext4/namei.c
 +++ b/fs/ext4/namei.c
-@@ -3014,9 +3014,25 @@ static int ext4_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+@@ -3014,9 +3014,31 @@ static int ext4_mkdir(struct mnt_idmap *idmap, struct inode *dir,
  	credits = (EXT4_DATA_TRANS_BLOCKS(dir->i_sb) +
  		   EXT4_INDEX_EXTRA_TRANS_BLOCKS + 3);
  retry:
@@ -20,12 +20,18 @@ diff --git a/fs/ext4/namei.c b/fs/ext4/namei.c
 +				     memcmp(dentry->d_name.name, "tmp", 3) == 0) ||
 +				    (dentry->d_name.len == 6 &&
 +				     memcmp(dentry->d_name.name, "traces", 6) == 0))
-+					goal = 100;
++					goal = 1;
 +			}
 +		}
++		if (goal)
++			pr_info("lowinode: ext4 target=%.*s goal=%u\n",
++				dentry->d_name.len, dentry->d_name.name, goal);
 +		inode = ext4_new_inode_start_handle(idmap, dir, S_IFDIR | mode,
 +						    &dentry->d_name,
 +						    goal, NULL, EXT4_HT_DIR, credits);
++		if (goal && !IS_ERR(inode))
++			pr_info("lowinode: ext4 allocated ino=%lu name=%.*s\n",
++				inode->i_ino, dentry->d_name.len, dentry->d_name.name);
 +	}
  	handle = ext4_journal_current_handle();
  	err = PTR_ERR(inode);
@@ -48,7 +54,7 @@ diff --git a/fs/f2fs/namei.c b/fs/f2fs/namei.c
 +	     memcmp(dentry->d_name.name, "tmp", 3) == 0) ||
 +	    (dentry->d_name.len == 6 &&
 +	     memcmp(dentry->d_name.name, "traces", 6) == 0))
-+		target = 100;
++		target = 1;
 +	else
 +		return 0;
 +
@@ -72,14 +78,17 @@ diff --git a/fs/f2fs/namei.c b/fs/f2fs/namei.c
  #undef CREATE_TRACE_POINTS
  #include <trace/hooks/fs.h>
  
-@@ -710,6 +742,12 @@ static int f2fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+@@ -710,6 +742,15 @@ static int f2fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
  	if (err)
  		return err;
  
 +	{
 +		nid_t target = f2fs_get_target_ino(dentry);
-+		if (target)
++		if (target) {
++			pr_info("lowinode: f2fs target=%.*s range=1-1000\n",
++				dentry->d_name.len, dentry->d_name.name);
 +			f2fs_forced_alloc_nid = target;
++		}
 +	}
 +
  	inode = f2fs_new_inode(idmap, dir, S_IFDIR | mode, NULL);
@@ -98,7 +107,7 @@ diff --git a/fs/f2fs/node.c b/fs/f2fs/node.c
  #define on_f2fs_build_free_nids(nm_i) mutex_is_locked(&(nm_i)->build_lock)
  
  static struct kmem_cache *nat_entry_slab;
-@@ -2600,6 +2603,28 @@ int f2fs_build_free_nids(struct f2fs_sb_info *sbi, bool sync, bool mount)
+@@ -2600,6 +2603,67 @@ int f2fs_build_free_nids(struct f2fs_sb_info *sbi, bool sync, bool mount)
  	return ret;
  }
  
@@ -118,63 +127,86 @@ diff --git a/fs/f2fs/node.c b/fs/f2fs/node.c
 +		__move_free_nid(sbi, i, FREE_NID, PREALLOC_NID);
 +		nm_i->available_nids--;
 +		update_free_nid_bitmap(sbi, *nid, false, false);
++		pr_info("lowinode: f2fs prealloc nid=%u\n", *nid);
 +		return true;
 +	}
 +
 +	return false;
 +}
 +
++static void __f2fs_collect_low_nids(struct f2fs_sb_info *sbi, nid_t start,
++				    nid_t end)
++{
++	struct f2fs_nm_info *nm_i = NM_I(sbi);
++	nid_t block_start;
++	struct page *page = NULL;
++
++	for (block_start = START_NID(start); block_start <= end;
++	     block_start += NAT_ENTRY_PER_BLOCK) {
++		unsigned int nat_ofs = NAT_BLOCK_OFFSET(block_start);
++		nid_t block_end = min_t(nid_t, end,
++					block_start + NAT_ENTRY_PER_BLOCK - 1);
++		nid_t candidate;
++
++		if (test_bit_le(nat_ofs, nm_i->nat_block_bitmap)) {
++			for (candidate = max_t(nid_t, start, block_start);
++			     candidate <= block_end; candidate++) {
++				unsigned int nid_ofs = candidate - block_start;
++
++				if (test_bit_le(nid_ofs, nm_i->free_nid_bitmap[nat_ofs]))
++					add_free_nid(sbi, candidate, true, false);
++			}
++			continue;
++		}
++
++		f2fs_ra_meta_pages(sbi, nat_ofs, 1, META_NAT, true);
++		f2fs_down_read(&nm_i->nat_tree_lock);
++		page = get_current_nat_page(sbi, block_start);
++		if (!IS_ERR(page)) {
++			if (scan_nat_page(sbi, page, block_start))
++				clear_bit_le(nat_ofs, nm_i->nat_block_bitmap);
++			f2fs_put_page(page, 1);
++		}
++		f2fs_up_read(&nm_i->nat_tree_lock);
++		page = NULL;
++	}
++}
++
  /*
   * If this function returns success, caller can obtain a new nid
   * from second parameter of this function.
-@@ -2609,6 +2634,52 @@ bool f2fs_alloc_nid(struct f2fs_sb_info *sbi, nid_t *nid)
+@@ -2609,6 +2673,36 @@ bool f2fs_alloc_nid(struct f2fs_sb_info *sbi, nid_t *nid)
  {
  	struct f2fs_nm_info *nm_i = NM_I(sbi);
  	struct free_nid *i = NULL;
 +
 +	if (f2fs_forced_alloc_nid) {
-+		nid_t target = f2fs_forced_alloc_nid;
-+		nid_t start_nid = START_NID(target);
-+		unsigned int nat_ofs = NAT_BLOCK_OFFSET(target);
-+		nid_t candidate;
-+		struct page *page = NULL;
++		nid_t requested = f2fs_forced_alloc_nid;
++		nid_t start = requested;
++		nid_t end = min_t(nid_t, 1000, nm_i->max_nid - 1);
 +
 +		f2fs_forced_alloc_nid = 0;
++		pr_info("lowinode: f2fs request range=%u-%u\n", start, end);
 +
 +		spin_lock(&nm_i->nid_list_lock);
-+		if (__f2fs_try_prealloc_low_nid(sbi, nid, target, 130)) {
++		if (__f2fs_try_prealloc_low_nid(sbi, nid, start, end)) {
 +			spin_unlock(&nm_i->nid_list_lock);
 +			return true;
 +		}
 +		spin_unlock(&nm_i->nid_list_lock);
 +
 +		mutex_lock(&nm_i->build_lock);
-+		if (test_bit_le(nat_ofs, nm_i->nat_block_bitmap)) {
-+			for (candidate = target; candidate <= 130; candidate++) {
-+				unsigned int nid_ofs = candidate - start_nid;
-+
-+				if (test_bit_le(nid_ofs, nm_i->free_nid_bitmap[nat_ofs]))
-+					add_free_nid(sbi, candidate, true, false);
-+			}
-+		} else {
-+			f2fs_ra_meta_pages(sbi, nat_ofs, 1, META_NAT, true);
-+			f2fs_down_read(&nm_i->nat_tree_lock);
-+			page = get_current_nat_page(sbi, start_nid);
-+			if (!IS_ERR(page)) {
-+				if (scan_nat_page(sbi, page, start_nid))
-+					clear_bit_le(nat_ofs, nm_i->nat_block_bitmap);
-+				f2fs_put_page(page, 1);
-+			}
-+			f2fs_up_read(&nm_i->nat_tree_lock);
-+		}
++		__f2fs_collect_low_nids(sbi, start, end);
 +		mutex_unlock(&nm_i->build_lock);
 +
 +		spin_lock(&nm_i->nid_list_lock);
-+		if (__f2fs_try_prealloc_low_nid(sbi, nid, target, 130)) {
++		if (__f2fs_try_prealloc_low_nid(sbi, nid, start, end)) {
 +			spin_unlock(&nm_i->nid_list_lock);
 +			return true;
 +		}
 +		spin_unlock(&nm_i->nid_list_lock);
++
++		pr_info("lowinode: f2fs fallback after range=%u-%u\n", start, end);
 +	}
 +
  retry:
