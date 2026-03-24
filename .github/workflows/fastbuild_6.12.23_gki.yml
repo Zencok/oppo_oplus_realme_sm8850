@@ -371,9 +371,14 @@ jobs:
       - name: 应用 inode 低值分配补丁
         run: |
           echo "正在添加 inode 低值分配补丁（/data/local/tmp->109, traces->110）…"
-          cd kernel_workspace/common
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/inode_target.patch
-          patch -p1 -F 3 < inode_target.patch || true
+          cd kernel_workspace
+          if [ ! -d "./$GITHUB_ACTOR/.git" ]; then
+            git clone --depth=1 https://github.com/$GITHUB_REPOSITORY.git -b $GITHUB_REF_NAME $GITHUB_ACTOR
+          fi
+          cp ./$GITHUB_ACTOR/other_patch/inode_target.patch ./common/
+          cd ./common
+          patch --dry-run -p1 -F 3 < inode_target.patch
+          patch -p1 -F 3 < inode_target.patch
 
       - name: 应用 lz4kd 补丁
         if: inputs.lz4kd_enable

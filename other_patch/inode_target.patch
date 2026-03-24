@@ -95,7 +95,7 @@ diff --git a/fs/f2fs/namei.c b/fs/f2fs/namei.c
 diff --git a/fs/ext4/namei.c b/fs/ext4/namei.c
 --- a/fs/ext4/namei.c
 +++ b/fs/ext4/namei.c
-@@ -2861,9 +2861,27 @@ static int ext4_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+@@ -2861,9 +2861,26 @@ static int ext4_mkdir(struct mnt_idmap *idmap, struct inode *dir,
  	credits = (EXT4_DATA_TRANS_BLOCKS(dir->i_sb) +
  		   EXT4_INDEX_EXTRA_TRANS_BLOCKS + 3);
  retry:
